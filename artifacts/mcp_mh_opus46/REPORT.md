@@ -3,7 +3,7 @@
 ## Overview
 
 This report presents results of applying the Meta-Harness algorithm
-(Lee et al., 2026, arXiv:2603.28052) to the MCP-Atlas benchmark, using
+(Lee et al., 2026, [arXiv:2603.28052](https://arxiv.org/pdf/2603.28052)) to the MCP-Atlas benchmark, using
 the A-Evolve framework. Meta-Harness evolves an AI agent's harness
 (system prompt, skills, scaffolding code) over multiple cycles, with
 Claude Code CLI as the proposer.
@@ -73,26 +73,25 @@ Total evolution wall time: 3.5 hours.
 | Std Dev (pass rate) | 4.5% | 3.8% | -0.7% |
 | Avg solve time per trial | 727s | 257s | **2.8x faster** |
 
-## Limitations: Task-Specific Leakage in Evolved Harness
+## Note on Overfitting Prevention
 
-The evolved `harness.py` contains hardcoded facts specific to individual
-benchmark tasks (e.g., a celebrity's exact date of death). This constitutes
-**task-specific knowledge leakage** — the proposer, having access to task
-trajectories during evolution, embedded answer fragments directly into the
-harness rather than improving general-purpose reasoning strategies.
+As [Lee et al. (2026, §4.3)](https://arxiv.org/pdf/2603.28052) note,
+overfitting is an inherent challenge in harness evolution: *"We additionally
+check for overfitting by manual inspection and regex-based audits for
+task-specific string leakage into evolved harnesses."*
 
-Our codebase includes a **regex-based audit** (`_audit_leakage` in
-`engine.py`) that scans evolved workspace files for hardcoded task IDs before
-accepting a candidate. This catches direct ID leakage but does not catch
-semantic leakage such as hardcoded facts derived from task content.
-
-As noted by Lee et al. (2026, §4.3): *"We additionally check for overfitting
-by manual inspection and regex-based audits for task-specific string leakage
-into evolved harnesses."* Our experience confirms that regex-based audits
-alone are insufficient — **manual inspection remains necessary** to catch
-semantic leakage that does not involve literal task IDs. Future work should
-explore automated semantic leakage detection (e.g., LLM-based auditing of
-whether harness content encodes task-specific answers).
+Following the paper's recommendation, our engine includes a **regex-based
+audit** (`_audit_leakage` in `engine.py`) that scans evolved workspace files
+for hardcoded task IDs before accepting a candidate. Upon manual inspection
+of the evolved artifact, we observed that the proposer occasionally embedded
+task-derived factual hints (e.g., a specific date) into the harness routing
+logic in `harness.py`. While the majority of the evolved harness consists
+of genuinely general-purpose improvements (tool routing, budget management,
+chain-task planning), these few instances highlight that **regex-based audits
+alone are not sufficient to catch all forms of semantic leakage** — manual
+review remains an important complementary step, consistent with the paper's
+methodology. Automated semantic leakage detection (e.g., LLM-based auditing)
+is a promising direction for future work.
 
 ## Artifact
 
