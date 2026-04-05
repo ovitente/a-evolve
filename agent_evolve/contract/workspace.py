@@ -59,6 +59,8 @@ class AgentWorkspace:
         if not self.skills_dir.exists():
             return []
         skills = []
+        seen_names: set[str] = set()
+        # Canonical format: skills/<name>/SKILL.md
         for d in sorted(self.skills_dir.iterdir()):
             if not d.is_dir() or d.name.startswith("_"):
                 continue
@@ -67,11 +69,30 @@ class AgentWorkspace:
                 meta = _parse_skill_frontmatter(skill_file)
                 meta.path = str(d.relative_to(self.root))
                 skills.append(meta)
+                seen_names.add(d.name)
+        # Fallback: flat skills/<name>.md files (e.g. from LLM bash writes)
+        for f in sorted(self.skills_dir.iterdir()):
+            if not f.is_file() or not f.name.endswith(".md"):
+                continue
+            if f.name.startswith("_") or f.suffix != ".md":
+                continue
+            stem = f.stem
+            if stem in seen_names:
+                continue
+            meta = _parse_skill_frontmatter(f)
+            meta.path = str(f.relative_to(self.root))
+            skills.append(meta)
+            seen_names.add(stem)
         return skills
 
     def read_skill(self, name: str) -> str:
+        # Canonical: skills/<name>/SKILL.md
         path = self.skills_dir / name / "SKILL.md"
-        return path.read_text() if path.exists() else ""
+        if path.exists():
+            return path.read_text()
+        # Fallback: skills/<name>.md
+        flat = self.skills_dir / f"{name}.md"
+        return flat.read_text() if flat.exists() else ""
 
     def write_skill(self, name: str, content: str) -> None:
         skill_dir = self.skills_dir / name
@@ -154,7 +175,10 @@ class AgentWorkspace:
             with open(jsonl) as f:
                 for line in f:
                     if line.strip():
-                        entry = json.loads(line)
+                        try:
+                            entry = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
                         entry.setdefault("_category", jsonl.stem)
                         all_memories.append(entry)
         return all_memories[-limit:]

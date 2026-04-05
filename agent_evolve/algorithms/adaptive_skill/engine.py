@@ -8,6 +8,7 @@ default EvolutionEngine implementation.
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -17,7 +18,7 @@ from ...engine.base import EvolutionEngine
 from ...engine.versioning import VersionControl
 from ...llm.base import LLMMessage, LLMProvider
 from ...types import Observation, StepResult
-from .prompts import DEFAULT_EVOLVER_SYSTEM_PROMPT, build_evolution_prompt
+from .prompts import DEFAULT_EVOLVER_SYSTEM_PROMPT, STRUCTURED_EVOLVER_SYSTEM_PROMPT, build_evolution_prompt
 from .tools import BASH_TOOL_SPEC, create_default_llm, make_workspace_bash
 
 logger = logging.getLogger(__name__)
@@ -152,6 +153,7 @@ class AdaptiveSkillEngine(EvolutionEngine):
 
     def _run_llm(self, prompt: str, workspace_root: Path) -> dict[str, Any]:
         """Run the evolver LLM with bash access to the workspace."""
+        self._workspace_root = workspace_root
         bash_fn = make_workspace_bash(workspace_root)
 
         try:
@@ -172,14 +174,159 @@ class AdaptiveSkillEngine(EvolutionEngine):
         except ImportError:
             pass
 
+        # For Anthropic and OpenAI: tool-use loop with workspace_bash
+        return self._tool_use_loop(prompt, bash_fn)
+
+    def _tool_use_loop(
+        self, prompt: str, bash_fn, max_turns: int = 20
+    ) -> dict[str, Any]:
+        """Run a multi-turn tool-use loop for non-Bedrock providers."""
+        from ...llm.anthropic import AnthropicProvider
+
+        total_usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
+        final_text = ""
+
+        if isinstance(self.llm, AnthropicProvider):
+            return self._anthropic_tool_loop(prompt, bash_fn, max_turns, total_usage)
+
+        # Non-tool-use models: structured output with <file> blocks
+        return self._structured_output_loop(prompt)
+
+    def _anthropic_tool_loop(
+        self, prompt: str, bash_fn, max_turns: int, total_usage: dict
+    ) -> dict[str, Any]:
+        """Anthropic-native tool-use loop."""
+        import anthropic
+
+        client = self.llm.client
+        model = self.llm.model
+
+        anthropic_tool = {
+            "name": "workspace_bash",
+            "description": BASH_TOOL_SPEC["description"],
+            "input_schema": BASH_TOOL_SPEC["input_schema"],
+        }
+
+        messages = [{"role": "user", "content": prompt}]
+        final_text_parts = []
+
+        for turn in range(max_turns):
+            response = client.messages.create(
+                model=model,
+                system=DEFAULT_EVOLVER_SYSTEM_PROMPT,
+                messages=messages,
+                tools=[anthropic_tool],
+                max_tokens=self.config.evolver_max_tokens,
+            )
+
+            total_usage["input_tokens"] += response.usage.input_tokens
+            total_usage["output_tokens"] += response.usage.output_tokens
+
+            # Collect text blocks
+            for block in response.content:
+                if hasattr(block, "text"):
+                    final_text_parts.append(block.text)
+
+            # Check if model wants to use a tool
+            if response.stop_reason != "tool_use":
+                break
+
+            # Execute tool calls
+            tool_results = []
+            for block in response.content:
+                if block.type == "tool_use":
+                    command = block.input.get("command", "")
+                    logger.info("Evolver bash: %s", command[:200])
+                    result = bash_fn(command)
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": result[:4000],
+                    })
+
+            # Append assistant response and tool results for next turn
+            messages.append({"role": "assistant", "content": response.content})
+            messages.append({"role": "user", "content": tool_results})
+
+        return {
+            "content": "\n".join(final_text_parts),
+            "usage": total_usage,
+        }
+
+    def _structured_output_loop(self, prompt: str) -> dict[str, Any]:
+        """For models without tool use: get structured output and apply file changes."""
+        workspace_root = getattr(self, '_workspace_root', None)
+
+        # Build context: show current files to the model
+        context_parts = []
+        if workspace_root:
+            for rel in ("prompts/system.md",):
+                p = workspace_root / rel
+                if p.exists():
+                    context_parts.append(f"### Current {rel}\n```\n{p.read_text()[:3000]}\n```")
+            skills_dir = workspace_root / "skills"
+            if skills_dir.exists():
+                for f in sorted(skills_dir.iterdir()):
+                    if f.is_file() and f.suffix == ".md" and not f.name.startswith("_"):
+                        context_parts.append(f"### Current skills/{f.name}\n```\n{f.read_text()[:2000]}\n```")
+                    elif f.is_dir() and not f.name.startswith("_"):
+                        sf = f / "SKILL.md"
+                        if sf.exists():
+                            context_parts.append(f"### Current skills/{f.name}/SKILL.md\n```\n{sf.read_text()[:2000]}\n```")
+            mem_dir = workspace_root / "memory"
+            if mem_dir.exists():
+                for f in sorted(mem_dir.iterdir()):
+                    if f.is_file() and f.suffix == ".jsonl":
+                        content = f.read_text()[-1000:]  # last entries
+                        context_parts.append(f"### Current memory/{f.name} (tail)\n```\n{content}\n```")
+
+        current_files = "\n\n".join(context_parts) if context_parts else "No existing files."
+
+        full_prompt = f"""{prompt}
+
+### Current Workspace Files
+{current_files}
+
+Remember: output changed files using <file path="...">content</file> blocks."""
+
         messages = [
-            LLMMessage(role="system", content=DEFAULT_EVOLVER_SYSTEM_PROMPT),
-            LLMMessage(role="user", content=prompt),
+            LLMMessage(role="system", content=STRUCTURED_EVOLVER_SYSTEM_PROMPT),
+            LLMMessage(role="user", content=full_prompt),
         ]
         response = self.llm.complete(
             messages, max_tokens=self.config.evolver_max_tokens
         )
-        return {
-            "content": response.content,
-            "usage": response.usage,
-        }
+
+        # Parse and apply file blocks
+        files_written = self._apply_file_blocks(response.content, workspace_root)
+        if files_written:
+            logger.info("Structured evolver wrote %d files: %s", len(files_written), files_written)
+        else:
+            logger.warning("Structured evolver returned no file blocks. Response length: %d chars. First 500: %s",
+                          len(response.content), response.content[:500])
+
+        return {"content": response.content, "usage": response.usage}
+
+    @staticmethod
+    def _apply_file_blocks(text: str, workspace_root: Path | None) -> list[str]:
+        """Parse <file path="...">content</file> blocks and write them."""
+        if not workspace_root:
+            return []
+        pattern = re.compile(
+            r'<file\s+path="([^"]+)">\s*\n(.*?)\n\s*</file>',
+            re.DOTALL,
+        )
+        written = []
+        for match in pattern.finditer(text):
+            rel_path = match.group(1).strip()
+            content = match.group(2)
+            # Security: prevent path traversal
+            if ".." in rel_path or rel_path.startswith("/"):
+                logger.warning("Skipping suspicious path: %s", rel_path)
+                continue
+            target = workspace_root / rel_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content)
+            written.append(rel_path)
+            logger.info("Structured evolver wrote: %s (%d chars)", rel_path, len(content))
+        return written

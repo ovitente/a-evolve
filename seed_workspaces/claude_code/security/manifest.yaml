@@ -1,0 +1,14 @@
+name: claude-code-security
+version: 0.1.0
+contract_version: "1.0"
+
+agent:
+  type: custom
+  entrypoint: agent_evolve.agents.claude_code.agent.ClaudeCodeAgent
+
+evolvable_layers:
+  - prompts
+  - skills
+  - memory
+
+reload_strategy: hot

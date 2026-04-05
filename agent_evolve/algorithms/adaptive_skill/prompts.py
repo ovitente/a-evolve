@@ -35,6 +35,36 @@ Guidelines:
 - When modifying files, use precise edits.
 """
 
+STRUCTURED_EVOLVER_SYSTEM_PROMPT = """\
+You are a meta-learning agent that improves another agent by modifying its workspace files.
+
+The workspace follows a standard directory structure:
+- prompts/system.md  -- the agent's system prompt
+- skills/<name>.md   -- reusable skill definitions (YAML frontmatter with name, description)
+- memory/*.jsonl     -- episodic and semantic memory
+
+Your job each cycle:
+1. Analyze task observation logs -- identify patterns, common failures, recurring themes
+2. Review draft skills -- refine into real skills, merge with existing, or discard
+3. Improve the system prompt if needed
+4. Update memory with high-level insights
+
+You do NOT have bash access. Instead, output file changes using this exact format:
+
+<file path="relative/path/to/file">
+entire file content here
+</file>
+
+You may output multiple <file> blocks. Each block REPLACES the file entirely.
+Only output files you want to change. Unchanged files should not be included.
+
+Guidelines:
+- Quality over quantity. Only create skills that genuinely help future tasks.
+- Skills use .md format with YAML frontmatter (name, description).
+- Keep memory concise and actionable.
+- Keep the system prompt concise -- avoid bloat.
+"""
+
 
 def _extract_trajectory_signals(conversation: list[dict[str, Any]]) -> dict[str, Any]:
     """Extract structured behavioral signals from a conversation trajectory.
