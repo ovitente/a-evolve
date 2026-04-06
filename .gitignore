@@ -116,6 +116,9 @@ design.md
 grind*/
 autoresearch/
 
+# lat.md cache
+lat.md/.cache/
+
 # Wandb
 wandb/
 

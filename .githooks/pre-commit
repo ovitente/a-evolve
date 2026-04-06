@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# @lat: [[tests#Failure signals]]
+set -euo pipefail
+
+# Ensure lat is available
+export PATH="$HOME/.npm-global/bin:$PATH"
+export LAT_LLM_KEY="${LAT_LLM_KEY:-unused}"
+
+if ! command -v lat >/dev/null 2>&1; then
+  echo "WARNING: lat not found, skipping lat checks. Run 'make lat-install' to set up."
+  exit 0
+fi
+
+echo "Running lat check..."
+lat check
+
+echo "Running lat sync policy..."
+STAGED="$(git diff --cached --name-only)"
+if [ -n "$STAGED" ]; then
+  NEEDS_LAT=0
+  HAS_LAT=0
+  echo "$STAGED" | grep -E '(^\.github/workflows/|^ansible/|^scripts/|^deploy/|Makefile|Dockerfile|docker-compose\.ya?ml|flake\.nix|shell\.nix|^agent_evolve/llm/|^agent_evolve/engine/)' >/dev/null && NEEDS_LAT=1 || true
+  echo "$STAGED" | grep -E '^lat\.md/' >/dev/null && HAS_LAT=1 || true
+
+  if [ "$NEEDS_LAT" -eq 1 ] && [ "$HAS_LAT" -eq 0 ]; then
+    echo ""
+    echo "BLOCKED: infra/engine files staged but lat.md/ not updated."
+    echo "Update the relevant lat.md/ file, then stage it."
+    exit 1
+  fi
+fi
+
+echo "Pre-commit checks passed."
